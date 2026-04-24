@@ -7,8 +7,9 @@ input double   LotSize              = 0.1;
 input int      NumOrders            = 1;
 input int      CandleCount          = 5;
 input ENUM_TIMEFRAMES Timeframe    = PERIOD_M1;
-input int      TakeProfitPoints     = 3000; // Used as SL
-input int      StopLossPoints       = 300;  // Used as TP
+input double   TakeProfitPoints     = 3000; // Used as SL when InverseLogic=true (min: 0.10)
+input double   StopLossPoints       = 300;  // Used as TP when InverseLogic=true (min: 0.10)
+input int      EntryWindowSeconds   = 3;    // Entry must occur within X seconds on candle open
 input int      MomentumSeconds      = 5;
 input double   MinMomentumPoints    = 5.0;
 input int      MaxOpenTrades        = 3;
@@ -21,6 +22,7 @@ input int      BreakevenOffsetPoints  = 0; // Points beyond entry to lock profit
 
 // === STATE VARIABLES ===
 datetime lastCandleTime = 0;
+datetime candleOpenTime = 0;
 int tradesToday = 0;
 datetime lastTradeDay = 0;
 int tradesThisCandle = 0;  // Track trades per candle
@@ -35,6 +37,8 @@ int OnInit()
 {
    Print("✅ ExplosiveInverseBot initialized");
    Print("   InverseLogic: ", (InverseLogic ? "ENABLED" : "DISABLED"));
+   Print("   Entry Window: ", EntryWindowSeconds, " seconds after candle open");
+   Print("   Min TP/SL value: 0.10");
    if (InverseLogic)
       Print("   TP and SL roles are SWAPPED (TP ⇄ SL)");
    return INIT_SUCCEEDED;
@@ -51,6 +55,7 @@ void OnTick()
 
    // New candle detected - reset trades per candle counter
    lastCandleTime = currentCandleTime;
+   candleOpenTime = currentCandleTime;
    tradesThisCandle = 0;
 
    int bullishCount = 0;
@@ -71,7 +76,7 @@ void OnTick()
 }
 
 //+------------------------------------------------------------------+
-//| Wait and confirm momentum                                        |
+//| Wait and confirm momentum with entry window check                |
 //+------------------------------------------------------------------+
 void CheckMomentumAndTrade(bool predictedBuy)
 {
@@ -82,6 +87,15 @@ void CheckMomentumAndTrade(bool predictedBuy)
       return;
    }
 
+   // Check if we're still within the entry window
+   datetime now = TimeCurrent();
+   int secondsSinceCandleOpen = (int)(now - candleOpenTime);
+   if (secondsSinceCandleOpen > EntryWindowSeconds)
+   {
+      Print("⚠️ Entry window expired. ", secondsSinceCandleOpen, "s > ", EntryWindowSeconds, "s. Skipping.");
+      return;
+   }
+
    double startPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    int waited = 0;
 
@@ -89,6 +103,15 @@ void CheckMomentumAndTrade(bool predictedBuy)
    {
       Sleep(1000);
       waited++;
+
+      // Re-check entry window during momentum wait
+      now = TimeCurrent();
+      secondsSinceCandleOpen = (int)(now - candleOpenTime);
+      if (secondsSinceCandleOpen > EntryWindowSeconds)
+      {
+         Print("⚠️ Entry window expired during momentum wait. Skipping.");
+         return;
+      }
    }
 
    double endPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
@@ -111,7 +134,6 @@ void CheckMomentumAndTrade(bool predictedBuy)
       return;
    }
 
-   datetime now = TimeCurrent();
    MqlDateTime nowStruct, lastStruct;
    TimeToStruct(now, nowStruct);
    TimeToStruct(lastTradeDay, lastStruct);
@@ -139,7 +161,7 @@ void CheckMomentumAndTrade(bool predictedBuy)
 }
 
 //+------------------------------------------------------------------+
-//| Open trade with inverse logic                                    |
+//| Open trade with inverse logic and validated SL/TP                |
 //+------------------------------------------------------------------+
 void OpenTrade(bool predictedBuy)
 {
@@ -155,13 +177,13 @@ void OpenTrade(bool predictedBuy)
    
    if (InverseLogic)
    {
-      usedSL = TakeProfitPoints;  // Used as SL
-      usedTP = StopLossPoints;    // Used as TP
+      usedSL = MathMax(TakeProfitPoints, 0.10);  // Used as SL, min 0.10
+      usedTP = MathMax(StopLossPoints, 0.10);    // Used as TP, min 0.10
    }
    else
    {
-      usedSL = StopLossPoints;    // Normal SL
-      usedTP = TakeProfitPoints;  // Normal TP
+      usedSL = MathMax(StopLossPoints, 0.10);    // Normal SL, min 0.10
+      usedTP = MathMax(TakeProfitPoints, 0.10);  // Normal TP, min 0.10
    }
 
    double tp = isBuy ? price + usedTP * point
